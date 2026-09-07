@@ -1,0 +1,40 @@
+{{ include "cups-server.fullname" . }} deployed.
+
+Endpoints
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  Web UI:  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/
+  IPP URI: ipp{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/printers/<queue>
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "cups-server.fullname" . }} 6631:{{ .Values.service.port }}
+  open http://127.0.0.1:6631/
+{{- end }}
+
+Queues
+{{- if .Values.printers }}
+{{- range .Values.printers }}
+  - {{ .name }} -> {{ .uri }}
+{{- end }}
+{{- else }}
+  No declarative queues configured. Add them under `printers:` or let
+  cups-browsed discover them{{ if not .Values.discovery.enabled }} (currently disabled){{ end }}.
+{{- end }}
+
+{{- if and .Values.discovery.enabled (not .Values.hostNetwork) }}
+
+WARNING: discovery.enabled=true but hostNetwork=false. Most CNIs drop multicast,
+so mDNS will not reach LAN printers. Either set hostNetwork=true, attach a
+macvlan interface via extraPodAnnotations, or use discovery.browsePoll.
+{{- end }}
+
+{{- if eq .Values.cups.allowFrom "all" }}
+{{- if not .Values.networkPolicy.enabled }}
+
+WARNING: cups.allowFrom="all" without a NetworkPolicy - anything able to reach
+the Service can enumerate and submit jobs. Set networkPolicy.enabled=true.
+{{- end }}
+{{- end }}
+
+Verify:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

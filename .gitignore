@@ -1,0 +1,15 @@
+# Helm packaging / release artifacts
+dist/
+*.tgz
+*.tgz.prov
+charts/**/charts/
+charts/**/Chart.lock
+
+# Scan artifacts
+*.sarif
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

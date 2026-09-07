@@ -1,0 +1,3 @@
+## Values
+
+{{ template "chart.valuesTable" . }}

@@ -1,0 +1,52 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- $d := .Values.metrics.prometheusRule.defaults }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "cups-server.fullname" . }}
+  namespace: {{ .Values.metrics.prometheusRule.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "cups-server.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}{{- toYaml . | nindent 4 }}{{- end }}
+spec:
+  groups:
+    - name: {{ include "cups-server.fullname" . }}
+      rules:
+        {{- with .Values.metrics.prometheusRule.rules }}
+        {{- toYaml . | nindent 8 }}
+        {{- else }}
+        - alert: CupsServerDown
+          expr: cups_up{job=~".*{{ include "cups-server.name" . }}.*"} == 0
+          for: {{ $d.downFor }}
+          labels: {severity: critical}
+          annotations:
+            summary: "CUPS scheduler is not answering IPP scrapes"
+            description: "The exporter could not reach cupsd for {{ $d.downFor }}."
+        - alert: CupsPrinterStopped
+          expr: cups_printer_state == 5
+          for: {{ $d.printerStoppedFor }}
+          labels: {severity: warning}
+          annotations:
+            summary: "Print queue {{`{{ $labels.printer }}`}} is stopped"
+            description: "cupsd disabled the queue - usually a backend/network failure on the printer."
+        - alert: CupsQueueNotAccepting
+          expr: cups_printer_accepting_jobs == 0
+          for: {{ $d.printerStoppedFor }}
+          labels: {severity: warning}
+          annotations:
+            summary: "Print queue {{`{{ $labels.printer }}`}} is rejecting jobs"
+        - alert: CupsJobStuck
+          expr: cups_job_oldest_age_seconds > {{ $d.queueStuckSeconds }}
+          for: {{ $d.queueStuckFor }}
+          labels: {severity: warning}
+          annotations:
+            summary: "Job stuck on {{`{{ $labels.printer }}`}}"
+            description: "Oldest pending job is {{`{{ $value | humanizeDuration }}`}} old."
+        - alert: CupsExporterScrapeErrors
+          expr: increase(cups_exporter_scrape_errors_total[15m]) > 5
+          for: 15m
+          labels: {severity: info}
+          annotations:
+            summary: "CUPS exporter is failing to scrape the scheduler"
+        {{- end }}
+{{- end }}

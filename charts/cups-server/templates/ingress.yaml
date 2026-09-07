@@ -1,0 +1,43 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullName := include "cups-server.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+{{- $edns := fromYaml (include "cups-server.externalDNSAnnotations" (dict "ctx" . "kind" "ingress")) -}}
+{{- $basicAuth := dict -}}
+{{- if include "cups-server.ingressAuth" . -}}
+{{- $basicAuth = dict "nginx.ingress.kubernetes.io/auth-type" "basic"
+                     "nginx.ingress.kubernetes.io/auth-secret" (printf "%s-basic-auth" $fullName)
+                     "nginx.ingress.kubernetes.io/auth-realm" "CUPS administration" -}}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "cups-server.labels" . | nindent 4 }}
+    {{- with .Values.ingress.labels }}{{- toYaml . | nindent 4 }}{{- end }}
+  {{- with merge (dict) .Values.ingress.annotations $edns $basicAuth }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+          {{- end }}
+    {{- end }}
+{{- end }}

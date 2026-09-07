@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cups-server.fullname" . }}
+  labels: {{- include "cups-server.labels" . | nindent 4 }}
+data:
+  {{- range $name, $content := .Values.cups.extraConfig }}
+  {{ $name }}: |
+    {{- tpl $content $ | nindent 4 }}
+  {{- end }}
+  {{- if not .Values.cups.extraConfig }}
+  .keep: ""
+  {{- end }}

@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "cups-server values",
+  "type": "object",
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "cupsd is a singleton over an RWO spool volume"
+    },
+    "hostNetwork": {
+      "type": "boolean"
+    },
+    "image": {
+      "type": "object",
+      "required": [
+        "registry",
+        "repository"
+      ],
+      "properties": {
+        "registry": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[a-f0-9]{64})?$"
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "cups": {
+      "type": "object",
+      "properties": {
+        "logLevel": {
+          "enum": [
+            "none",
+            "emerg",
+            "alert",
+            "crit",
+            "error",
+            "warn",
+            "notice",
+            "info",
+            "debug",
+            "debug2"
+          ]
+        },
+        "maxJobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxJobTime": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preserveJobHistory": {
+          "type": "string"
+        },
+        "preserveJobFiles": {
+          "enum": [
+            "yes",
+            "no"
+          ]
+        },
+        "defaultShared": {
+          "enum": [
+            "yes",
+            "no"
+          ]
+        },
+        "webInterface": {
+          "enum": [
+            "yes",
+            "no"
+          ]
+        },
+        "browsing": {
+          "enum": [
+            "on",
+            "off"
+          ]
+        },
+        "extraConfig": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "printers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "uri"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+$",
+            "maxLength": 127
+          },
+          "uri": {
+            "type": "string",
+            "pattern": "^[a-z0-9+.-]+:"
+          },
+          "model": {
+            "type": "string"
+          },
+          "ppd": {
+            "type": "string"
+          },
+          "info": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "shared": {
+            "type": "boolean"
+          },
+          "default": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "options": {
+            "type": "object"
+          }
+        },
+        "not": {
+          "required": [
+            "model",
+            "ppd"
+          ]
+        },
+        "additionalProperties": false
+      }
+    },
+    "plugins": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "debs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "url",
+              "sha256"
+            ],
+            "properties": {
+              "url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "externalDNS": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "target": {
+          "enum": [
+            "ingress",
+            "service",
+            "both"
+          ]
+        },
+        "hostnames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ttl": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "serviceMonitor": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "vmServiceScrape": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "config": {
+          "$ref": "#/definitions/claim"
+        },
+        "spool": {
+          "$ref": "#/definitions/claim"
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "none",
+            "ingress",
+            "cups"
+          ],
+          "description": "Where admin authentication is enforced"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1
+        },
+        "password": {
+          "type": "string"
+        },
+        "existingSecret": {
+          "type": "string"
+        },
+        "existingSecretUserKey": {
+          "type": "string"
+        },
+        "existingSecretPasswordKey": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "claim": {
+      "type": "object",
+      "properties": {
+        "size": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|K|M|G|T)?$"
+        },
+        "storageClass": {
+          "type": "string"
+        },
+        "accessModes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "ReadWriteOnce",
+              "ReadWriteMany",
+              "ReadWriteOncePod"
+            ]
+          }
+        },
+        "existingClaim": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

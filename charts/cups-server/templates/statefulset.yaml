@@ -1,0 +1,424 @@
+{{- include "cups-server.validate" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cups-server.fullname" . }}
+  labels: {{- include "cups-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ include "cups-server.fullname" . }}-headless
+  podManagementPolicy: OrderedReady
+  updateStrategy: {{- toYaml .Values.updateStrategy | nindent 4 }}
+  {{- if .Values.persistence.enabled }}
+  persistentVolumeClaimRetentionPolicy: {{- toYaml .Values.persistence.retentionPolicy | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels: {{- include "cups-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include "cups-server.configChecksum" . }}
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+        {{- with .Values.extraPodAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+      labels:
+        {{- include "cups-server.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "cups-server.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      hostNetwork: {{ .Values.hostNetwork }}
+      dnsPolicy: {{ .Values.dnsPolicy | default (ternary "ClusterFirstWithHostNet" "ClusterFirst" .Values.hostNetwork) }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints: {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      initContainers:
+        {{- if .Values.plugins.enabled }}
+        # 1. Seed the writable driver overlay from the image so the read-only
+        #    rootfs keeps its baked-in filters after we mount over those paths.
+        - name: seed-driver-dirs
+          image: {{ include "cups-server.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              set -x
+              cp -an /usr/lib/cups/filter/.   /overlay/lib-filter/   2>/dev/null || true
+              cp -an /usr/lib/cups/backend/.  /overlay/lib-backend/  2>/dev/null || true
+              cp -an /usr/share/cups/model/.  /overlay/share-model/  2>/dev/null || true
+              cp -an /usr/share/ppd/.         /overlay/share-ppd/    2>/dev/null || true
+          volumeMounts:
+            - {name: driver-overlay, mountPath: /overlay}
+          resources: {{- toYaml .Values.plugins.resources | nindent 12 }}
+
+        # 2. Fetch and unpack drivers. Runs as root because apt needs it; it
+        #    only ever writes into the emptyDir overlay, never the rootfs.
+        - name: plugin-installer
+          image: {{ include "cups-server.pluginImage" . }}
+          imagePullPolicy: {{ .Values.plugins.image.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+          env:
+            - name: DEBIAN_FRONTEND
+              value: noninteractive
+            - name: PLUGIN_PACKAGES
+              value: {{ join " " .Values.plugins.packages | quote }}
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              work=$(mktemp -d)
+              root="$work/root"
+              mkdir -p "$root"
+              if [ -n "${PLUGIN_PACKAGES}" ]; then
+                apt-get update -qq
+                ( cd "$work" && apt-get download -qq ${PLUGIN_PACKAGES} )
+              fi
+              {{- range .Values.plugins.debs }}
+              echo "fetching {{ .url }}"
+              curl -fsSL --retry 3 -o "$work/{{ base .url }}" "{{ .url }}" 2>/dev/null \
+                || ( apt-get update -qq && apt-get install -y -qq curl && curl -fsSL --retry 3 -o "$work/{{ base .url }}" "{{ .url }}" )
+              echo "{{ required "plugins.debs[].sha256 is required" .sha256 }}  $work/{{ base .url }}" | sha256sum -c -
+              {{- end }}
+              for deb in "$work"/*.deb; do
+                [ -e "$deb" ] || continue
+                echo "unpacking $(basename "$deb")"
+                dpkg-deb -x "$deb" "$root"
+              done
+              copy() { [ -d "$1" ] && cp -a "$1/." "$2/" || true; }
+              copy "$root/usr/lib/cups/filter"  /overlay/lib-filter
+              copy "$root/usr/lib/cups/backend" /overlay/lib-backend
+              copy "$root/usr/share/cups/model" /overlay/share-model
+              copy "$root/usr/share/ppd"        /overlay/share-ppd
+              # vendor blobs (cnijfilter2 et al) ship libs and helpers outside CUPS paths
+              copy "$root/usr/lib/bjlib"        /overlay/vendor
+              copy "$root/usr/lib/$(uname -m)-linux-gnu" /overlay/vendor-lib
+              chown -R {{ .Values.podSecurityContext.runAsUser }}:{{ .Values.podSecurityContext.runAsGroup }} /overlay
+              chmod -R a+rX /overlay
+              find /overlay/lib-filter /overlay/lib-backend -type f -exec chmod 0755 {} + 2>/dev/null || true
+              rm -rf "$work"
+          volumeMounts:
+            - {name: driver-overlay, mountPath: /overlay}
+            {{- with .Values.plugins.extraVolumeMounts }}{{- toYaml . | nindent 12 }}{{- end }}
+          resources: {{- toYaml .Values.plugins.resources | nindent 12 }}
+        {{- end }}
+        {{- with .Values.extraInitContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+      containers:
+        #----------------------------------------------------------------- cupsd
+        - name: cupsd
+          image: {{ include "cups-server.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          args: ["cupsd"]
+          ports:
+            - {name: ipp, containerPort: 631, protocol: TCP}
+          env:
+            - {name: CUPS_LOGLEVEL,           value: {{ .Values.cups.logLevel | quote }}}
+            - {name: CUPS_ALLOW_FROM,         value: {{ .Values.cups.allowFrom | quote }}}
+            - {name: CUPS_SERVER_ALIAS,       value: {{ .Values.cups.serverAlias | quote }}}
+            - {name: CUPS_SERVER_NAME,        value: {{ .Values.cups.serverName | default (include "cups-server.fullname" .) | quote }}}
+            - {name: CUPS_MAX_JOBS,           value: {{ .Values.cups.maxJobs | quote }}}
+            - {name: CUPS_MAX_JOB_TIME,       value: {{ .Values.cups.maxJobTime | quote }}}
+            - {name: CUPS_PRESERVE_JOB_HISTORY, value: {{ .Values.cups.preserveJobHistory | quote }}}
+            - {name: CUPS_PRESERVE_JOB_FILES, value: {{ .Values.cups.preserveJobFiles | quote }}}
+            - {name: CUPS_DEFAULT_SHARED,     value: {{ .Values.cups.defaultShared | quote }}}
+            - {name: CUPS_WEB_INTERFACE,      value: {{ .Values.cups.webInterface | quote }}}
+            - {name: CUPS_BROWSING,           value: {{ .Values.cups.browsing | quote }}}
+            - {name: CUPS_REQUIRE_ADMIN_AUTH,  value: {{ ternary "yes" "no" (eq .Values.auth.mode "cups") | quote }}}
+            - {name: CUPS_PROVISION_DIR,      value: /etc/cups/printers.d}
+            - {name: CUPS_PLUGIN_DIR,         value: /plugins.d}
+            {{- if include "cups-server.authEnabled" . }}
+            - name: CUPS_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cups-server.configSecretName" . }}
+                  key: {{ .Values.auth.existingSecretUserKey }}
+            - name: CUPS_ADMIN_PASSWORD_FILE
+              value: /run/secrets/cups/password
+            {{- end }}
+            {{- with .Values.extraEnv }}{{- toYaml . | nindent 12 }}{{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            exec: {command: ["/usr/local/bin/healthcheck.sh"]}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          {{- end }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            exec: {command: ["/usr/local/bin/healthcheck.sh"]}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          {{- end }}
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            # exec instead of tcpSocket: no host field is needed at all, since
+            # this runs inside the container's own namespace regardless of
+            # hostNetwork - avoiding the kubelet-dials-podIP problem entirely
+            # rather than working around it with an explicit 127.0.0.1. Also a
+            # more meaningful check: confirms the scheduler actually answers,
+            # not just that something is listening on the port.
+            exec: {command: ["/usr/local/bin/healthcheck.sh"]}
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          {{- end }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/cups}
+            - {name: spool,  mountPath: /var/spool/cups}
+            - {name: cache,  mountPath: /var/cache/cups}
+            - {name: logs,   mountPath: /var/log/cups}
+            - {name: run,    mountPath: /run/cups}
+            - {name: tmp,    mountPath: /tmp}
+            - {name: printers, mountPath: /etc/cups/printers.d, readOnly: true}
+            - {name: cupsd-dropins, mountPath: /etc/cups/cupsd.conf.d, readOnly: true}
+            {{- if .Values.extraPPDs }}
+            - {name: extra-ppd, mountPath: /opt/cups-ppd, readOnly: true}
+            {{- end }}
+            {{- if include "cups-server.authEnabled" . }}
+            - {name: auth, mountPath: /run/secrets/cups, readOnly: true}
+            {{- end }}
+            {{- if .Values.plugins.enabled }}
+            - {name: driver-overlay, mountPath: /usr/lib/cups/filter,  subPath: lib-filter}
+            - {name: driver-overlay, mountPath: /usr/lib/cups/backend, subPath: lib-backend}
+            - {name: driver-overlay, mountPath: /usr/share/cups/model, subPath: share-model}
+            - {name: driver-overlay, mountPath: /usr/share/ppd,        subPath: share-ppd}
+            {{- end }}
+            {{- if .Values.usbPrinters.enabled }}
+            - {name: usb, mountPath: /dev/bus/usb}
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}{{- toYaml . | nindent 12 }}{{- end }}
+
+        #-------------------------------------------------------------- exporter
+        {{- if .Values.metrics.enabled }}
+        - name: exporter
+          image: {{ include "cups-server.exporterImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["/usr/bin/tini", "-g", "--", "python3", "/opt/cups-exporter/cups_exporter.py"]
+          ports:
+            - {name: metrics, containerPort: {{ .Values.metrics.port }}, protocol: TCP}
+          env:
+            - {name: CUPS_SERVER, value: "127.0.0.1:631"}
+            - {name: EXPORTER_LISTEN_PORT, value: {{ .Values.metrics.port | quote }}}
+            - {name: EXPORTER_JOB_LIMIT, value: {{ .Values.metrics.exporter.jobLimit | quote }}}
+            - {name: EXPORTER_LOG_LEVEL, value: {{ .Values.metrics.exporter.logLevel | quote }}}
+            - name: EXPORTER_PAGE_LOG
+              value: {{ ternary "/var/log/cups/page_log" "" .Values.metrics.exporter.pageLog.enabled | quote }}
+            - {name: EXPORTER_PAGE_LOG_USERS, value: {{ .Values.metrics.exporter.pageLog.perUser | quote }}}
+          readinessProbe:
+            exec: {command: ["/usr/local/bin/exporter-healthcheck.sh"]}
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources: {{- toYaml .Values.metrics.exporter.resources | nindent 12 }}
+          volumeMounts:
+            - {name: logs, mountPath: /var/log/cups, readOnly: true}
+            - {name: run,  mountPath: /run/cups, readOnly: true}
+            - {name: tmp-exporter, mountPath: /tmp}
+        {{- end }}
+
+        #---------------------------------------------------------- cups-browsed
+        {{- if .Values.discovery.enabled }}
+        - name: cups-browsed
+          image: {{ include "cups-server.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["/usr/bin/tini", "-g", "--", "/usr/local/bin/cups-browsed-entrypoint.sh"]
+          env:
+            - {name: CUPS_SERVER, value: "127.0.0.1:631"}
+            - {name: BROWSE_REMOTE_PROTOCOLS, value: {{ .Values.discovery.browseRemoteProtocols | quote }}}
+            - {name: BROWSE_INTERVAL, value: {{ .Values.discovery.browseInterval | quote }}}
+            - {name: BROWSE_TIMEOUT, value: {{ .Values.discovery.browseTimeout | quote }}}
+            - {name: CREATE_IPP_PRINTER_QUEUES, value: {{ .Values.discovery.createIPPPrinterQueues | quote }}}
+            - {name: IPP_PRINTER_QUEUE_TYPE, value: {{ .Values.discovery.ippPrinterQueueType | quote }}}
+            - {name: LOCAL_QUEUE_NAMING, value: {{ .Values.discovery.localQueueNaming | quote }}}
+            - {name: BROWSE_ALLOW, value: {{ join " " .Values.discovery.browseAllow | quote }}}
+            - {name: BROWSE_DENY, value: {{ join " " .Values.discovery.browseDeny | quote }}}
+            - {name: BROWSE_POLL, value: {{ join " " .Values.discovery.browsePoll | quote }}}
+            - {name: BROWSED_LOGLEVEL, value: {{ .Values.cups.logLevel | quote }}}
+          resources: {{- toYaml .Values.discovery.resources | nindent 12 }}
+          volumeMounts:
+            - {name: run, mountPath: /run/cups}
+            - {name: dbus, mountPath: /run/dbus}
+            - {name: tmp-browsed, mountPath: /tmp}
+        {{- end }}
+
+        #----------------------------------------------------------------- avahi
+        {{- if and .Values.discovery.enabled .Values.discovery.avahi.enabled }}
+        - name: avahi
+          image: {{ include "cups-server.avahiImage" . }}
+          imagePullPolicy: {{ .Values.discovery.avahi.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.discovery.avahi.securityContext | nindent 12 }}
+          command: {{ .Values.discovery.avahi.command | toJson }}
+          env:
+            - {name: AVAHI_DISABLE_PUBLISHING, value: {{ ternary "no" "yes" .Values.discovery.avahi.publish | quote }}}
+            - {name: AVAHI_ALLOW_INTERFACES, value: {{ .Values.discovery.avahi.allowInterfaces | quote }}}
+            - {name: AVAHI_DENY_INTERFACES, value: {{ .Values.discovery.avahi.denyInterfaces | quote }}}
+            - {name: DBUS_SOCKET_DIR, value: /run/dbus}
+          ports:
+            - {name: mdns, containerPort: 5353, protocol: UDP}
+          resources: {{- toYaml .Values.discovery.avahi.resources | nindent 12 }}
+          # /var/run is a symlink to /run on Debian and Alpine alike, so this is
+          # the same socket the cups-browsed container sees at /run/dbus.
+          volumeMounts:
+            - {name: dbus, mountPath: /run/dbus}
+            - {name: tmp-avahi, mountPath: /tmp}
+            - {name: avahi-run, mountPath: /run/avahi-daemon}
+            {{- if .Values.discovery.avahi.config }}
+            - name: avahi-config
+              mountPath: /etc/avahi/avahi-daemon.conf.override
+              subPath: avahi-daemon.conf
+              readOnly: true
+            {{- end }}
+        {{- end }}
+
+        {{- with .Values.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+      volumes:
+        - name: cache
+          emptyDir: {sizeLimit: 512Mi}
+        - name: logs
+          emptyDir: {sizeLimit: 256Mi}
+        - name: run
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}
+        - name: dbus
+          emptyDir: {medium: Memory, sizeLimit: 8Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+        - name: tmp-exporter
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}
+        - name: tmp-browsed
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}
+        - name: tmp-avahi
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}
+        - name: avahi-run
+          emptyDir: {medium: Memory, sizeLimit: 8Mi}
+        {{- if and .Values.discovery.enabled .Values.discovery.avahi.enabled .Values.discovery.avahi.config }}
+        - name: avahi-config
+          configMap:
+            name: {{ include "cups-server.fullname" . }}-avahi
+        {{- end }}
+        - name: printers
+          configMap:
+            name: {{ include "cups-server.fullname" . }}-printers
+        - name: cupsd-dropins
+          configMap:
+            name: {{ include "cups-server.fullname" . }}
+        {{- if .Values.extraPPDs }}
+        - name: extra-ppd
+          configMap:
+            name: {{ include "cups-server.fullname" . }}-ppd
+        {{- end }}
+        {{- if .Values.plugins.enabled }}
+        - name: driver-overlay
+          emptyDir: {sizeLimit: 2Gi}
+        {{- end }}
+        {{- with .Values.plugins.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if include "cups-server.authEnabled" . }}
+        - name: auth
+          secret:
+            secretName: {{ include "cups-server.configSecretName" . }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.auth.existingSecretPasswordKey }}
+                path: password
+        {{- end }}
+        {{- if .Values.usbPrinters.enabled }}
+        - name: usb
+          hostPath:
+            path: {{ .Values.usbPrinters.hostPath }}
+            type: Directory
+        {{- end }}
+        {{- if not .Values.persistence.enabled }}
+        - name: config
+          emptyDir: {}
+        - name: spool
+          emptyDir: {}
+        {{- else }}
+        {{- if .Values.persistence.config.existingClaim }}
+        - name: config
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.config.existingClaim }}
+        {{- end }}
+        {{- if .Values.persistence.spool.existingClaim }}
+        - name: spool
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.spool.existingClaim }}
+        {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    {{- if not .Values.persistence.config.existingClaim }}
+    - metadata:
+        name: config
+        labels: {{- include "cups-server.labels" . | nindent 10 }}
+        {{- with .Values.persistence.config.annotations }}
+        annotations: {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes: {{- toYaml .Values.persistence.config.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.config.size }}
+        {{- with .Values.persistence.config.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+    {{- end }}
+    {{- if not .Values.persistence.spool.existingClaim }}
+    - metadata:
+        name: spool
+        labels: {{- include "cups-server.labels" . | nindent 10 }}
+        {{- with .Values.persistence.spool.annotations }}
+        annotations: {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes: {{- toYaml .Values.persistence.spool.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.spool.size }}
+        {{- with .Values.persistence.spool.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+    {{- end }}
+  {{- end }}

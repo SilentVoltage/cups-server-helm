@@ -1,0 +1,12 @@
+{{- if .Values.extraPPDs }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cups-server.fullname" . }}-ppd
+  labels: {{- include "cups-server.labels" . | nindent 4 }}
+data:
+  {{- range $name, $content := .Values.extraPPDs }}
+  {{ $name }}: |
+    {{- $content | nindent 4 }}
+  {{- end }}
+{{- end }}

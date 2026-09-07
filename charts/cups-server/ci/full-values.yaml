@@ -1,0 +1,44 @@
+# ct install with every optional subsystem rendered
+persistence:
+  enabled: false
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+  vmServiceScrape:
+    enabled: false
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: cups.ci.example.com
+      paths: [{path: /, pathType: Prefix}]
+externalDNS:
+  enabled: true
+  target: both
+  ttl: 120
+networkPolicy:
+  enabled: true
+  allowFrom:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: default}
+auth:
+  enabled: true
+  username: cupsadmin
+  password: ci-only-not-a-real-secret
+printers:
+  - name: virtual-pdf
+    uri: cups-pdf:/
+    model: everywhere
+    info: CI virtual queue
+    shared: true
+    options:
+      media: iso_a4_210x297mm
+discovery:
+  enabled: true
+  avahi:
+    enabled: true
+  browsePoll: ["192.0.2.5"]
+plugins:
+  enabled: true
+  packages: [printer-driver-escpr]

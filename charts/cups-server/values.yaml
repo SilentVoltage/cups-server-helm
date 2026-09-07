@@ -1,0 +1,462 @@
+# -- Override the chart name portion of resource names
+nameOverride: ""
+# -- Fully override the generated release name
+fullnameOverride: ""
+
+image:
+  # -- Image registry. Swap to docker.io for the Docker Hub mirror
+  registry: ghcr.io
+  # -- Image repository (without registry)
+  repository: silentvoltage/cups-server
+  # -- Image tag. Defaults to `.Chart.AppVersion`. Prefer pinning a digest below.
+  tag: ""
+  # -- Image digest (`sha256:...`). Takes precedence over `tag` when set.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# -- CUPS is a stateful singleton (spool + config on one RWO volume). Do not raise.
+replicaCount: 1
+
+# Only Recreate is safe: two cupsd processes on one RWO PVC will corrupt the spool.
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    partition: 0
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+## ===== security =====
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+  # lp(7) is needed for USB/parallel device nodes when `usbPrinters.enabled=true`
+  supplementalGroups: [7]
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+## ===== cupsd =====
+cups:
+  # -- cupsd log level: none|emerg|alert|crit|error|warn|notice|info|debug|debug2
+  logLevel: warn
+  # -- Comma/space separated allow rules for the `<Location />` blocks.
+  #    "all" is safe only when the NetworkPolicy below is enabled.
+  allowFrom: "all"
+  # -- Host header whitelist. Required for Ingress access; cupsd returns HTTP 400
+  #    for unknown Host values. "*" accepts anything the Ingress forwards.
+  serverAlias: "*"
+  serverName: ""
+  maxJobs: 500
+  maxJobTime: 10800
+  preserveJobHistory: "yes"
+  preserveJobFiles: "no"
+  defaultShared: "yes"
+  webInterface: "yes"
+  # -- cupsd's own CUPS-protocol browsing. Discovery is handled by cups-browsed.
+  browsing: "off"
+  # -- Verbatim fragments appended to the rendered cupsd.conf (key -> content)
+  extraConfig: {}
+  #  10-timeouts.conf: |
+  #    Timeout 900
+  #    KeepAliveTimeout 30
+
+# -- Declarative print queues. Reconciled on every pod start via lpadmin.
+#    `model` accepts an `everywhere`/`drv:///` spec; `ppd` points at a file
+#    provided through `extraPPDs` or a plugin.
+printers: []
+#  - name: office-mfp
+#    uri: ipp://192.0.2.31/ipp/print
+#    model: everywhere            # driverless IPP; preferred
+#    info: "Office MFP"
+#    location: "HQ / 2nd floor"
+#    shared: true
+#    default: true
+#    options:
+#      media: iso_a4_210x297mm
+#      sides: two-sided-long-edge
+#      print-color-mode: monochrome
+#  - name: label-printer
+#    uri: socket://192.0.2.44:9100
+#    ppd: /etc/cups/ppd/zebra.ppd
+
+# -- Extra PPD files rendered into a ConfigMap and mounted at /etc/cups/ppd
+extraPPDs: {}
+#  zebra.ppd: |
+#    *PPD-Adobe: "4.3"
+#    ...
+
+## ===== plugins =====
+plugins:
+  # -- Install extra driver packages/blobs at pod start into a shared emptyDir.
+  #    Reliable path is baking them into the image (see the image repo build
+  #    args); use this only when you cannot rebuild.
+  enabled: false
+  # -- Init container image used to fetch/extract packages
+  image:
+    registry: docker.io
+    repository: debian
+    tag: bookworm-slim
+    pullPolicy: IfNotPresent
+  # -- apt packages installed into the plugin overlay (requires egress + a mirror)
+  packages: []
+  #  - printer-driver-escpr
+  #  - printer-driver-brlaser
+  # -- Vendor .deb URLs with mandatory sha256 (e.g. Canon cnijfilter2)
+  debs: []
+  #  - url: https://gdlp01.c-wss.com/.../cnijfilter2_6.20-1_amd64.deb
+  #    sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  # -- Pre-staged plugin artifacts from an existing PVC/ConfigMap/Secret
+  extraVolumes: []
+  extraVolumeMounts: []
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 512Mi}
+
+## ===== discovery =====
+discovery:
+  # -- cups-browsed sidecar: creates local queues for printers found via DNS-SD
+  enabled: true
+  # -- Avahi sidecar providing the mDNS stack that cups-browsed queries.
+  #
+  # Defaults to the chart's own image, which runs dbus-daemon + avahi-daemon
+  # with dbus enabled. Third-party avahi images are frequently built with
+  # `enable-dbus=no`: avahi starts, cups-browsed connects to nothing, and no
+  # printers are discovered - with no error in either log. Override
+  # image.repository only if you know the image exposes the system bus.
+  avahi:
+    enabled: true
+    image:
+      # Empty registry/repository = use the main cups-server image.
+      registry: ""
+      repository: ""
+      tag: ""
+      pullPolicy: IfNotPresent
+    # -- Entrypoint. Clear this ([]) when supplying a third-party avahi image.
+    command: ["/usr/bin/tini", "-g", "--", "/usr/local/bin/avahi-entrypoint.sh"]
+    # -- Avahi needs uid 0 to start the system bus and to bind its runtime
+    # dirs; it drops to the avahi/messagebus users itself. This is why the
+    # container does not inherit the pod-level non-root context.
+    securityContext:
+      runAsUser: 0
+      runAsGroup: 0
+      runAsNonRoot: false
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: false
+      capabilities:
+        drop: ["ALL"]
+        # dbus-daemon stays as root (see avahi-entrypoint.sh --config-file) -
+        # its own identity isn't D-Bus-policy-relevant, so it needs nothing
+        # extra. avahi-daemon, however, MUST become the "avahi" user: the
+        # shipped D-Bus policy (avahi-dbus.conf) grants ownership of the
+        # org.freedesktop.Avahi service name specifically to that user,
+        # checked against the connecting peer's real UID - staying root
+        # fails that ACL outright, it isn't a capability problem. SETUID/
+        # SETGID/SETPCAP let avahi-daemon's own setuid+capset demotion
+        # succeed; CHOWN/FOWNER cover it handing /run/avahi-daemon to itself
+        # as part of that same handoff.
+        add: ["SETUID", "SETGID", "SETPCAP", "CHOWN", "FOWNER"]
+    # -- Restrict Avahi to specific interfaces (comma separated). Useful with
+    # hostNetwork so it does not answer on the node's other NICs.
+    allowInterfaces: ""
+    denyInterfaces: ""
+    # -- Publish this host's own services over mDNS. Off by default: the point
+    # of the sidecar is discovering printers, not advertising CUPS.
+    publish: false
+    # -- Full avahi-daemon.conf override. Leave empty to use the generated one.
+    config: ""
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {memory: 128Mi}
+  browseRemoteProtocols: "dnssd cups"
+  browseInterval: 60
+  browseTimeout: 300
+  createIPPPrinterQueues: "All"
+  ippPrinterQueueType: "Auto"
+  localQueueNaming: "DNSSD"
+  # -- CIDRs cups-browsed will accept advertisements from
+  browseAllow: []
+  #  - 192.0.2.0/24
+  browseDeny: []
+  # -- Poll these CUPS servers directly (unicast fallback when mDNS is unroutable)
+  browsePoll: []
+  resources:
+    requests: {cpu: 25m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+# -- mDNS/DNS-SD only works on the pod's L2 segment. Standard CNIs do not forward
+#    multicast, so LAN printer discovery requires one of:
+#      hostNetwork: true                    (simplest, pins the pod to a node)
+#      a macvlan/ipvlan attachment via Multus (cleaner, needs Multus installed)
+#      discovery.browsePoll against a reachable CUPS/IPP host (no multicast)
+hostNetwork: false
+dnsPolicy: ""   # auto-set to ClusterFirstWithHostNet when hostNetwork=true
+
+# -- Extra network attachment annotations, e.g. Multus macvlan
+extraPodAnnotations: {}
+#  k8s.v1.cni.cncf.io/networks: printer-macvlan
+
+## ===== USB =====
+usbPrinters:
+  # -- Mount /dev/bus/usb from the node. Requires the pod to land on the node
+  #    with the printer attached - pair with nodeSelector/affinity.
+  enabled: false
+  hostPath: /dev/bus/usb
+
+## ===== service =====
+service:
+  type: ClusterIP
+  port: 631
+  nodePort: null
+  annotations: {}
+  labels: {}
+  clusterIP: ""
+  loadBalancerIP: ""
+  loadBalancerSourceRanges: []
+  externalTrafficPolicy: ""
+  # -- Additional Service exposing IPP on a LoadBalancer for printers/clients
+  #    that cannot traverse the Ingress (raw IPP, port 631 without a Host header).
+  extra:
+    enabled: false
+    type: LoadBalancer
+    annotations: {}
+
+## ===== ingress =====
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    # CUPS rejects large uploads slowly; disable the proxy body limit for jobs.
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+  labels: {}
+  hosts:
+    - host: cups.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: cups-tls
+  #    hosts: [cups.example.com]
+
+## ===== externalDNS =====
+externalDNS:
+  # -- Emit external-dns annotations on the Ingress and/or Service
+  enabled: false
+  # -- Target of the annotations: ingress | service | both
+  target: ingress
+  # -- Hostnames. Defaults to the ingress hosts when empty.
+  hostnames: []
+  ttl: 300
+  # -- Overrides the record target (CNAME) instead of resolving from the object
+  aliasTarget: ""
+  # -- Extra external-dns annotations merged verbatim
+  extraAnnotations: {}
+  #  external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+
+## ===== metrics =====
+metrics:
+  enabled: true
+  port: 9628
+  exporter:
+    # -- Defaults to the main image (the exporter ships inside it)
+    image:
+      registry: ""
+      repository: ""
+      tag: ""
+    pageLog:
+      # -- Parse /var/log/cups/page_log for cumulative page counters
+      enabled: true
+      # -- Adds a `user` label. Watch cardinality on shared queues.
+      perUser: false
+    jobLimit: 1000
+    logLevel: INFO
+    resources:
+      requests: {cpu: 25m, memory: 64Mi}
+      limits: {memory: 128Mi}
+
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+    honorLabels: false
+    relabelings: []
+    metricRelabelings: []
+
+  # VictoriaMetrics operator equivalent
+  vmServiceScrape:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+    relabelConfigs: []
+    metricRelabelConfigs: []
+
+  prometheusRule:
+    enabled: false
+    namespace: ""
+    labels: {}
+    # -- Set to a list to fully replace the default rules
+    rules: []
+    defaults:
+      printerStoppedFor: 15m
+      queueStuckFor: 30m
+      queueStuckSeconds: 1800
+      downFor: 10m
+
+## ===== storage =====
+persistence:
+  enabled: true
+  # -- /etc/cups: queue definitions, PPDs, certs
+  config:
+    size: 1Gi
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    annotations: {}
+    existingClaim: ""
+  # -- /var/spool/cups: job spool. Size for your largest concurrent job set.
+  spool:
+    size: 5Gi
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    annotations: {}
+    existingClaim: ""
+  # -- Keep PVCs when the StatefulSet is deleted
+  retentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+
+## ===== auth =====
+auth:
+  # -- How the CUPS admin interface is protected. One of:
+  #
+  #   none      No authentication anywhere. Anyone who can reach the pod can add,
+  #             modify and delete printers. Only sane on a trusted network with
+  #             networkPolicy.enabled=true.
+  #
+  #   ingress   Authentication happens at the Ingress (Traefik/nginx basic auth).
+  #             CUPS itself asks for nothing, so there is exactly one login
+  #             prompt. Requests that bypass the Ingress - anything hitting the
+  #             Service directly in-cluster - are NOT authenticated, so pair this
+  #             with networkPolicy.enabled=true.
+  #
+  #   cups      CUPS enforces its own Basic auth, in addition to any Ingress
+  #             auth. Uses pam_pwdfile (see the image's /etc/pam.d/cups) because
+  #             the stock PAM stack reads /etc/shadow, which this container
+  #             cannot write. Protects the Service path too, at the cost of two
+  #             login prompts when reached through an authenticated Ingress.
+  mode: none
+
+  # -- Which ingress controller's basic-auth Secret format to emit. `traefik`
+  #    writes a `users` key (what the basicAuth Middleware reads); `nginx`
+  #    writes `auth`. Traefik's loader errors on a Secret containing more than
+  #    one candidate key, so this can't just emit both unconditionally.
+  ingressController: traefik
+
+  # -- Admin username. Used for both the Ingress basic-auth realm and CUPS.
+  username: cupsadmin
+
+  # -- Admin password. Leave empty to auto-generate a 24-char random one on first
+  #    install; it is stored in the `<release>-auth` Secret and reused on every
+  #    subsequent upgrade, so upgrades never rotate it.
+  #
+  #    Read it back with:
+  #      kubectl get secret <release>-auth -n <ns> \
+  #        -o jsonpath='{.data.password}' | base64 -d
+  #
+  #    The Secret is annotated `helm.sh/resource-policy: keep`, so `helm
+  #    uninstall` leaves it behind - an auto-generated password would otherwise
+  #    be unrecoverable. Delete the Secret by hand to force a new one.
+  password: ""
+
+  # -- Supply credentials from a Secret you manage instead of the chart's.
+  #    Must contain the two keys named below.
+  existingSecret: ""
+  existingSecretUserKey: username
+  existingSecretPasswordKey: password
+
+## ===== policy =====
+networkPolicy:
+  enabled: false
+  # -- Ingress sources allowed to reach :631
+  allowFrom: []
+  #  - namespaceSelector:
+  #      matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+  # -- Allow scraping from the monitoring namespace
+  monitoringNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: monitoring
+  # -- Egress rules. Printers usually live outside the cluster CIDR.
+  egress:
+    enabled: true
+    allowDNS: true
+    to: []
+    #  - ipBlock: {cidr: 192.0.2.0/24}
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 0
+
+## ===== runtime =====
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 20
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 5
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+startupProbe:
+  enabled: true
+  periodSeconds: 5
+  failureThreshold: 30
+
+terminationGracePeriodSeconds: 60
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+extraContainers: []
+extraInitContainers: []
+extraObjects: []

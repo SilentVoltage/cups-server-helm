@@ -1,0 +1,33 @@
+{{- if .Values.metrics.vmServiceScrape.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "cups-server: metrics.vmServiceScrape.enabled requires metrics.enabled=true (nothing would expose the metrics port)" }}
+{{- end }}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ include "cups-server.fullname" . }}
+  namespace: {{ .Values.metrics.vmServiceScrape.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "cups-server.labels" . | nindent 4 }}
+    {{- with .Values.metrics.vmServiceScrape.labels }}{{- toYaml . | nindent 4 }}{{- end }}
+  {{- with .Values.metrics.vmServiceScrape.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace }}]
+  selector:
+    matchLabels: {{- include "cups-server.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.vmServiceScrape.interval }}
+      scrapeTimeout: {{ .Values.metrics.vmServiceScrape.scrapeTimeout }}
+      {{- with .Values.metrics.vmServiceScrape.relabelConfigs }}
+      relabelConfigs: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.metrics.vmServiceScrape.metricRelabelConfigs }}
+      metricRelabelConfigs: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,147 @@
+name: chart
+on:
+  push:
+    branches: [master]
+    tags: ["cups-server-*"]
+  pull_request:
+permissions:
+  contents: read
+env:
+  CHART_DIR: charts/cups-server
+  GHCR_REPOSITORY: ${{ vars.GHCR_REPOSITORY }}
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    # helm-docs now commits the regenerated README instead of just failing and
+    # telling a human to run it locally - that needs write access.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: azure/setup-helm@v4
+        with: {version: v3.16.3}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: helm/chart-testing-action@v2.7.0
+      - name: ct lint
+        run: ct lint --config .github/ct.yaml
+      - name: helm unittest
+        run: |
+          helm plugin install https://github.com/helm-unittest/helm-unittest --version 0.6.3
+          helm unittest ${CHART_DIR}
+      - name: Render all value profiles
+        run: |
+          set -euo pipefail
+          for f in ${CHART_DIR}/ci/*-values.yaml; do
+            echo "::group::render $f"
+            helm template ci ${CHART_DIR} -f "$f" > "/tmp/$(basename "$f").yaml"
+            echo "::endgroup::"
+          done
+      - name: kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+          for f in /tmp/*-values.yaml.yaml; do
+            kubeconform -strict -summary -ignore-missing-schemas \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              "$f"
+          done
+      - name: helm-docs
+        run: |
+          curl -sSL https://github.com/norwoodj/helm-docs/releases/download/v1.14.2/helm-docs_1.14.2_Linux_x86_64.tar.gz \
+            | tar xz -C /usr/local/bin helm-docs
+          helm-docs --chart-search-root=charts
+
+      # Auto-commit the regenerated README instead of failing and pointing a
+      # human at a local helm-docs install. Same-repo PR branches and direct
+      # pushes to master get the commit pushed straight back.
+      - name: Commit README changes (same-repo PR)
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          if git diff --quiet -- '**/README.md'; then
+            echo "README.md already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -- '**/README.md'
+          git commit -m "docs: regenerate README via helm-docs [skip ci]"
+          git push origin "HEAD:${GITHUB_HEAD_REF}"
+
+      # Fork PRs: GITHUB_TOKEN is read-only there by design, so pushing is not
+      # possible. Fail with the diff inline instead of a confusing permission
+      # error - still no local helm-docs install needed, just copy the diff.
+      - name: Show README diff (fork PR)
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          if git diff --quiet -- '**/README.md'; then
+            echo "README.md already up to date"
+            exit 0
+          fi
+          echo "::error::README.md is out of date. Fork PRs cannot auto-commit - apply this diff:"
+          git diff -- '**/README.md'
+          exit 1
+
+      - name: Commit README changes (push to master)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          if git diff --quiet -- '**/README.md'; then
+            echo "README.md already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -- '**/README.md'
+          git commit -m "docs: regenerate README via helm-docs [skip ci]"
+          git push origin HEAD:master
+
+      - name: Create kind cluster
+        if: github.event_name == 'pull_request'
+        uses: helm/kind-action@v1.10.0
+      - name: ct install
+        if: github.event_name == 'pull_request'
+        run: ct install --config .github/ct.yaml
+  release:
+    needs: lint-test
+    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: azure/setup-helm@v4
+        with: {version: v3.16.3}
+      - name: Package
+        id: pkg
+        run: |
+          set -euo pipefail
+          helm package ${CHART_DIR} --destination dist
+          echo "file=$(ls dist/*.tgz)" >> "$GITHUB_OUTPUT"
+          echo "version=$(helm show chart ${CHART_DIR} | awk '/^version:/{print $2}')" >> "$GITHUB_OUTPUT"
+      - name: Push to GHCR (OCI)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ env.GHCR_REPOSITORY }} --password-stdin
+          helm push "${{ steps.pkg.outputs.file }}" "oci://ghcr.io/${{ env.GHCR_REPOSITORY }}/charts"
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign chart (keyless)
+        run: |
+          DIGEST=$(crane digest ghcr.io/${{ env.GHCR_REPOSITORY }}/charts/cups-server:${{ steps.pkg.outputs.version }} 2>/dev/null || true)
+          if [ -n "$DIGEST" ]; then
+            cosign sign --yes "ghcr.io/${{ env.GHCR_REPOSITORY }}/charts/cups-server@${DIGEST}"
+          fi
+        continue-on-error: true
+      # GitHub Releases + a classic index.yaml repo on gh-pages, for consumers
+      # that cannot use OCI registries.
+      - name: chart-releaser
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: helm/chart-releaser-action@v1.6.0
+        with:
+          charts_dir: charts
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CR_SKIP_EXISTING: "true"

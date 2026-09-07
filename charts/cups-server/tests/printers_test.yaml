@@ -1,0 +1,36 @@
+suite: declarative printers
+templates:
+  - configmap-printers.yaml
+tests:
+  - it: renders a queue definition consumable by lpadmin
+    set:
+      printers:
+        - name: office
+          uri: ipp://192.0.2.5/ipp/print
+          model: everywhere
+          info: Office MFP
+          shared: true
+          default: true
+          options:
+            media: iso_a4_210x297mm
+    asserts:
+      - matchRegex:
+          path: data["office.conf"]
+          pattern: URI="ipp://192\.0\.2\.5/ipp/print"
+      - matchRegex:
+          path: data["office.conf"]
+          pattern: MODEL="everywhere"
+      - matchRegex:
+          path: data["office.conf"]
+          pattern: SHARED="yes"
+      - matchRegex:
+          path: data["office.conf"]
+          pattern: OPTIONS="media=iso_a4_210x297mm
+
+  - it: rejects a queue without a URI
+    set:
+      printers:
+        - name: broken
+    asserts:
+      - failedTemplate:
+          errorPattern: uri is required

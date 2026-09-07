@@ -1,0 +1,68 @@
+suite: ingress, service and external-dns
+templates:
+  - ingress.yaml
+  - service.yaml
+tests:
+  - it: emits external-dns annotations on the ingress only
+    templates: [ingress.yaml]
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: print.example.com
+            paths: [{path: /, pathType: Prefix}]
+      externalDNS:
+        enabled: true
+        target: ingress
+        ttl: 120
+    asserts:
+      - isSubset:
+          path: metadata.annotations
+          content:
+            external-dns.alpha.kubernetes.io/hostname: print.example.com
+            external-dns.alpha.kubernetes.io/ttl: "120"
+
+  - it: honours externalDNS.hostnames over the ingress hosts
+    templates: [ingress.yaml]
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: print.example.com
+            paths: [{path: /, pathType: Prefix}]
+      externalDNS:
+        enabled: true
+        target: ingress
+        ttl: 300
+        hostnames: [alias.example.com]
+    asserts:
+      - isSubset:
+          path: metadata.annotations
+          content:
+            external-dns.alpha.kubernetes.io/hostname: alias.example.com
+
+  - it: keeps the proxy body limit disabled for print jobs
+    templates: [ingress.yaml]
+    set:
+      ingress: {enabled: true}
+    asserts:
+      - isSubset:
+          path: metadata.annotations
+          content:
+            nginx.ingress.kubernetes.io/proxy-body-size: "0"
+
+  - it: exposes the metrics port on the service when metrics are on
+    templates: [service.yaml]
+    documentIndex: 0
+    set:
+      metrics:
+        enabled: true
+        port: 9628
+    asserts:
+      - contains:
+          path: spec.ports
+          content:
+            name: metrics
+            port: 9628
+            targetPort: metrics
+            protocol: TCP

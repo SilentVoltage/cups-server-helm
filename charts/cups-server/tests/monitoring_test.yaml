@@ -1,0 +1,66 @@
+suite: monitoring resources
+templates:
+  - servicemonitor.yaml
+  - vmservicescrape.yaml
+tests:
+  # Every test states all three metrics flags explicitly. Relying on chart
+  # defaults for the flags a test does not care about makes the outcome depend
+  # on how the runner merges values between tests, which is not something a
+  # test should be sensitive to.
+  - it: renders nothing by default
+    set:
+      metrics:
+        enabled: true
+        serviceMonitor: {enabled: false}
+        vmServiceScrape: {enabled: false}
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a ServiceMonitor
+    templates: [servicemonitor.yaml]
+    set:
+      metrics:
+        enabled: true
+        serviceMonitor: {enabled: true, interval: 15s}
+        vmServiceScrape: {enabled: false}
+    asserts:
+      - isKind: {of: ServiceMonitor}
+      - equal:
+          path: spec.endpoints[0].interval
+          value: 15s
+
+  - it: renders a VMServiceScrape
+    templates: [vmservicescrape.yaml]
+    set:
+      metrics:
+        enabled: true
+        serviceMonitor: {enabled: false}
+        vmServiceScrape: {enabled: true}
+    asserts:
+      - isKind: {of: VMServiceScrape}
+      - equal:
+          path: apiVersion
+          value: operator.victoriametrics.com/v1beta1
+
+  - it: fails when scraping is requested without the exporter
+    templates: [servicemonitor.yaml]
+    set:
+      metrics:
+        enabled: false
+        serviceMonitor: {enabled: true}
+        vmServiceScrape: {enabled: false}
+    asserts:
+      - failedTemplate:
+          errorPattern: "requires metrics.enabled"
+
+  - it: fails when VM scraping is requested without the exporter
+    templates: [vmservicescrape.yaml]
+    set:
+      metrics:
+        enabled: false
+        serviceMonitor: {enabled: false}
+        vmServiceScrape: {enabled: true}
+    asserts:
+      - failedTemplate:
+          errorPattern: "requires metrics.enabled"

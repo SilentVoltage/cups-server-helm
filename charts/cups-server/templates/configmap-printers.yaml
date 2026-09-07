@@ -1,0 +1,38 @@
+{{- /*
+Declarative print queues. entrypoint.sh sources each file and calls lpadmin,
+so this is reconciled on every pod start (idempotent - lpadmin updates in place).
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cups-server.fullname" . }}-printers
+  labels: {{- include "cups-server.labels" . | nindent 4 }}
+data:
+  {{- range .Values.printers }}
+  {{- if not .name }}{{ fail "printers[].name is required" }}{{ end }}
+  {{- if not .uri }}{{ fail (printf "printers[%s].uri is required" .name) }}{{ end }}
+  {{ .name }}.conf: |
+    NAME={{ .name | quote }}
+    URI={{ .uri | quote }}
+    {{- with .ppd }}
+    PPD={{ . | quote }}
+    {{- end }}
+    {{- with .model }}
+    MODEL={{ . | quote }}
+    {{- end }}
+    {{- with .info }}
+    INFO={{ . | quote }}
+    {{- end }}
+    {{- with .location }}
+    LOCATION={{ . | quote }}
+    {{- end }}
+    SHARED={{ ternary "yes" "no" (default false .shared) | quote }}
+    DEFAULT={{ ternary "yes" "no" (default false .default) | quote }}
+    ENABLED={{ ternary "yes" "no" (default true .enabled) | quote }}
+    {{- if .options }}
+    OPTIONS="{{- range $k, $v := .options }}{{ $k }}={{ $v }} {{ end }}"
+    {{- end }}
+  {{- end }}
+  {{- if not .Values.printers }}
+  .keep: ""
+  {{- end }}

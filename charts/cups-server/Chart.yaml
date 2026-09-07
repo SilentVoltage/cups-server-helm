@@ -1,0 +1,30 @@
+apiVersion: v2
+name: cups-server
+description: Helm chart for an unprivileged CUPS print server on Kubernetes, with driver plugins, mDNS printer discovery and Prometheus metrics
+type: application
+version: 0.1.1
+appVersion: "2.4.7"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/silentvoltage/cups-server-helm
+sources:
+  - https://github.com/silentvoltage/cups-server-helm
+  - https://github.com/silentvoltage/cups-server-docker
+keywords:
+  - cups
+  - printing
+  - ipp
+  - ipp-everywhere
+  - printer
+maintainers:
+  - name: silentvoltage
+    url: https://github.com/silentvoltage
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "false"
+  artifacthub.io/prerelease: "true"
+  artifacthub.io/containsSecurityUpdates: "false"
+  artifacthub.io/changes: |
+    - kind: fixed
+      description: Point image.repository at the published image instead of a placeholder
+    - kind: changed
+      description: Rewrite the description and repository README for the public release

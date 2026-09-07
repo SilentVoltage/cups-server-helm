@@ -1,0 +1,51 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cups-server.fullname" . }}
+  labels: {{- include "cups-server.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "cups-server.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    {{- if .Values.networkPolicy.egress.enabled }}
+    - Egress
+    {{- end }}
+  ingress:
+    - ports:
+        - {port: 631, protocol: TCP}
+      {{- with .Values.networkPolicy.allowFrom }}
+      from: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- if .Values.metrics.enabled }}
+    - ports:
+        - {port: {{ .Values.metrics.port }}, protocol: TCP}
+      from:
+        - namespaceSelector: {{- toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 12 }}
+    {{- end }}
+  {{- if .Values.networkPolicy.egress.enabled }}
+  egress:
+    {{- if .Values.networkPolicy.egress.allowDNS }}
+    - ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    {{- end }}
+    {{- if .Values.discovery.enabled }}
+    # mDNS
+    - ports:
+        - {port: 5353, protocol: UDP}
+    {{- end }}
+    # printer protocols: IPP/IPPS, JetDirect, LPD
+    - ports:
+        - {port: 631, protocol: TCP}
+        - {port: 9100, protocol: TCP}
+        - {port: 515, protocol: TCP}
+      {{- with .Values.networkPolicy.egress.to }}
+      to: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with .Values.networkPolicy.egress.extraRules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+{{- end }}

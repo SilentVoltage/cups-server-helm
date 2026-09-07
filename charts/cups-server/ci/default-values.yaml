@@ -1,0 +1,9 @@
+# ct install default profile
+persistence:
+  enabled: false
+metrics:
+  enabled: true
+discovery:
+  enabled: true
+  avahi:
+    enabled: true

@@ -1,0 +1,83 @@
+suite: auth modes
+templates:
+  - statefulset.yaml
+  - secret.yaml
+  - ingress.yaml
+tests:
+  - it: mode none renders no auth secrets and no CUPS_ADMIN_* env
+    templates: [statefulset.yaml, secret.yaml]
+    set:
+      auth:
+        mode: none
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: secret.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CUPS_ADMIN_USER
+        template: statefulset.yaml
+
+  - it: mode ingress sets CUPS_REQUIRE_ADMIN_AUTH=no and creates the auth secret
+    templates: [statefulset.yaml, secret.yaml]
+    set:
+      auth:
+        mode: ingress
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CUPS_REQUIRE_ADMIN_AUTH
+            value: "no"
+        template: statefulset.yaml
+      - isKind:
+          of: Secret
+        template: secret.yaml
+        documentIndex: 0
+
+  - it: mode ingress with ingress enabled also creates the basic-auth secret
+    templates: [ingress.yaml, secret.yaml]
+    set:
+      auth:
+        mode: ingress
+      ingress:
+        enabled: true
+        hosts:
+          - host: print.example.com
+            paths: [{path: /, pathType: Prefix}]
+    asserts:
+      - hasDocuments:
+          count: 2
+        template: secret.yaml
+      # Asserting the WHOLE map (not one bracketed key) so a failure's "Actual:"
+      # output in CI shows every annotation actually rendered - the fastest way
+      # to see real output without a local helm binary.
+      - isSubset:
+          path: metadata.annotations
+          content:
+            nginx.ingress.kubernetes.io/auth-type: basic
+        template: ingress.yaml
+
+  - it: mode cups sets CUPS_REQUIRE_ADMIN_AUTH=yes
+    # This is the exact case that broke: ternary fed a string instead of a
+    # bool. A plain render (no crash) is the assertion that matters here.
+    templates: [statefulset.yaml]
+    set:
+      auth:
+        mode: cups
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CUPS_REQUIRE_ADMIN_AUTH
+            value: "yes"
+
+  - it: rejects an invalid mode
+    templates: [statefulset.yaml]
+    set:
+      auth:
+        mode: bogus
+    asserts:
+      - failedTemplate:
+          errorPattern: "auth.mode must be one of"

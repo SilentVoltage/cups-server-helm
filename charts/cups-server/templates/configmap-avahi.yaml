@@ -1,0 +1,10 @@
+{{- if and .Values.discovery.enabled .Values.discovery.avahi.enabled .Values.discovery.avahi.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cups-server.fullname" . }}-avahi
+  labels: {{- include "cups-server.labels" . | nindent 4 }}
+data:
+  avahi-daemon.conf: |
+    {{- tpl .Values.discovery.avahi.config . | nindent 4 }}
+{{- end }}
