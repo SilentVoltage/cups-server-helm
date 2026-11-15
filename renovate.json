@@ -81,6 +81,18 @@
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "gitleaks/gitleaks",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>IMAGE_TAG):\\s*\"?(?<currentValue>[0-9.]+)\"?"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "ghcr.io/silentvoltage/cups-server",
+      "versioningTemplate": "semver"
     }
   ],
   "packageRules": [
