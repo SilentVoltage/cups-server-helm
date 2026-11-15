@@ -1,0 +1,108 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":separateMajorReleases",
+    ":label(renovate)"
+  ],
+  "helm-values": {
+    "enabled": true
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>HELM_VERSION):\\s*\"?v?(?<currentValue>[0-9.]+)\"?"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "helm/helm",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>HELM_UNITTEST_VERSION):\\s*\"?v?(?<currentValue>[0-9.]+)\"?"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "helm-unittest/helm-unittest",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>HELM_DOCS_VERSION):\\s*\"?v?(?<currentValue>[0-9.]+)\"?"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "norwoodj/helm-docs",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>KUBECONFORM_VERSION):\\s*\"?v?(?<currentValue>[0-9.]+)\"?"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "yannh/kubeconform",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>TRIVY_VERSION):\\s*\"?v?(?<currentValue>[0-9.]+)\"?"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "aquasecurity/trivy",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>GITLEAKS_VERSION):\\s*\"?v?(?<currentValue>[0-9.]+)\"?"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "gitleaks/gitleaks",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "groupName": "CI Tool Versions",
+      "commitMessagePrefix": "chore(deps): update",
+      "commitMessageTopic": "{{depName}} version"
+    },
+    {
+      "description": "CI renders with Helm 3, which the chart supports",
+      "matchDepNames": [
+        "helm/helm"
+      ],
+      "allowedVersions": "<4.0.0"
+    }
+  ],
+  "labels": [
+    "helm",
+    "devops",
+    "dependencies"
+  ]
+}

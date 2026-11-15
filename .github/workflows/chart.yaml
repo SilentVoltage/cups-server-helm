@@ -1,58 +1,217 @@
-name: chart
+name: Lint, Test and Release Helm chart
+
 on:
   push:
-    branches: [master]
-    tags: ["cups-server-*"]
+    branches: [ master ]
+    tags: [ 'cups-server-*' ]
   pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default; jobs opt into what they need.
 permissions:
   contents: read
+
 env:
   CHART_DIR: charts/cups-server
   GHCR_REPOSITORY: ${{ vars.GHCR_REPOSITORY }}
+  HELM_VERSION: "v3.22.1"
+  HELM_UNITTEST_VERSION: "0.6.3"
+  HELM_DOCS_VERSION: "1.14.2"
+  KUBECONFORM_VERSION: "v0.8.0"
+  TRIVY_VERSION: "v0.76.1"
+  GITLEAKS_VERSION: "8.30.1"
+  # Oldest Kubernetes the chart supports (Chart.yaml kubeVersion), and the newest tested.
+  KUBE_VERSIONS: "1.25.0 1.35.5"
+
 jobs:
-  lint-test:
+  lint:
     runs-on: ubuntu-latest
-    # helm-docs now commits the regenerated README instead of just failing and
-    # telling a human to run it locally - that needs write access.
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # ct compares the chart with master for the version-bump check.
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up chart-testing
+        uses: helm/chart-testing-action@v2
+
+      # PRs lint what changed and check the version bump; pushes lint everything.
+      - name: Lint chart (ct lint)
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            ct lint --config .github/ct.yaml
+          else
+            ct lint --config .github/ct.yaml --all --check-version-increment=false
+          fi
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Unit-test templates (helm unittest)
+        run: |
+          helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}"
+          helm unittest "${CHART_DIR}"
+
+  integration:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload Trivy SARIF
+      actions: read            # codeql-action/upload-sarif on private repos
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # ct install compares the chart with master.
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Set up kubeconform
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          url="https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}"
+          curl -fsSLO "$url/kubeconform-linux-amd64.tar.gz"
+          curl -fsSL "$url/CHECKSUMS" | grep ' kubeconform-linux-amd64.tar.gz$' | sha256sum -c -
+          tar -xzf kubeconform-linux-amd64.tar.gz kubeconform && rm kubeconform-linux-amd64.tar.gz
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Render every values profile, oldest and newest Kubernetes
+        run: |
+          mkdir -p rendered
+          for kv in $KUBE_VERSIONS; do
+            for f in "$CHART_DIR"/ci/*-values.yaml; do
+              echo "::group::render $(basename "$f") for Kubernetes $kv"
+              helm template ci "$CHART_DIR" -f "$f" --kube-version "$kv" > "rendered/$(basename "$f" .yaml)-k8s-$kv.yaml"
+              echo "::endgroup::"
+            done
+          done
+
+      - name: Validate rendered manifests (kubeconform)
+        run: |
+          for kv in $KUBE_VERSIONS; do
+            kubeconform -strict -summary -ignore-missing-schemas \
+              -kubernetes-version "$kv" \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              rendered/*-k8s-"$kv".yaml
+          done
+
+      # The image tag defaults to appVersion, so a release of the image repo has to exist.
+      - name: Check the default image is published
+        run: |
+          image=$(helm template ci "$CHART_DIR" | yq eval-all '[select(.kind == "StatefulSet")][0].spec.template.spec.containers[0].image')
+          echo "default image: $image"
+          if ! docker manifest inspect "$image" > /dev/null; then
+            echo "::error::$image is not published, so a default install cannot pull it."
+            exit 1
+          fi
+
+      - name: Scan rendered manifests (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: config
+          scan-ref: rendered
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+
+      # Code scanning is free on public repos only; private ones need GitHub Code Security.
+      - name: Upload Trivy results to code scanning
+        if: always() && !github.event.repository.private
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Fail on CRITICAL misconfigurations
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: config
+          scan-ref: rendered
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+        env:
+          # Reuse the checks bundle the SARIF scan above already pulled.
+          TRIVY_SKIP_CHECK_UPDATE: true
+
+      - name: Set up Python
+        if: github.event_name == 'pull_request'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up chart-testing
+        if: github.event_name == 'pull_request'
+        uses: helm/chart-testing-action@v2
+
+      - name: Create kind cluster
+        if: github.event_name == 'pull_request'
+        uses: helm/kind-action@v1
+
+      - name: Install and test the chart (ct install)
+        if: github.event_name == 'pull_request'
+        run: ct install --config .github/ct.yaml
+
+  docs:
+    runs-on: ubuntu-latest
+    # helm-docs commits the regenerated README instead of just failing and
+    # telling a human to run it locally - that needs write access, so only this
+    # job has it, and it runs nothing but helm-docs.
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-        with: {fetch-depth: 0}
-      - uses: azure/setup-helm@v4
-        with: {version: v3.16.3}
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12"}
-      - uses: helm/chart-testing-action@v2.7.0
-      - name: ct lint
-        run: ct lint --config .github/ct.yaml
-      - name: helm unittest
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # Same-repo PRs check out the PR branch itself, so the commit lands on it.
+          ref: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || '' }}
+
+      - name: Set up helm-docs
         run: |
-          helm plugin install https://github.com/helm-unittest/helm-unittest --version 0.6.3
-          helm unittest ${CHART_DIR}
-      - name: Render all value profiles
-        run: |
-          set -euo pipefail
-          for f in ${CHART_DIR}/ci/*-values.yaml; do
-            echo "::group::render $f"
-            helm template ci ${CHART_DIR} -f "$f" > "/tmp/$(basename "$f").yaml"
-            echo "::endgroup::"
-          done
-      - name: kubeconform
-        run: |
-          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
-            | tar xz -C /usr/local/bin kubeconform
-          for f in /tmp/*-values.yaml.yaml; do
-            kubeconform -strict -summary -ignore-missing-schemas \
-              -schema-location default \
-              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-              "$f"
-          done
-      - name: helm-docs
-        run: |
-          curl -sSL https://github.com/norwoodj/helm-docs/releases/download/v1.14.2/helm-docs_1.14.2_Linux_x86_64.tar.gz \
-            | tar xz -C /usr/local/bin helm-docs
-          helm-docs --chart-search-root=charts
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          file="helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz"
+          url="https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}"
+          curl -fsSLO "$url/$file"
+          curl -fsSL "$url/checksums.txt" | grep " $file\$" | sha256sum -c -
+          tar -xzf "$file" helm-docs && rm "$file"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Regenerate README (helm-docs)
+        run: helm-docs --chart-search-root=charts
 
       # Auto-commit the regenerated README instead of failing and pointing a
       # human at a local helm-docs install. Same-repo PR branches and direct
@@ -97,44 +256,98 @@ jobs:
           git commit -m "docs: regenerate README via helm-docs [skip ci]"
           git push origin HEAD:master
 
-      - name: Create kind cluster
-        if: github.event_name == 'pull_request'
-        uses: helm/kind-action@v1.10.0
-      - name: ct install
-        if: github.event_name == 'pull_request'
-        run: ct install --config .github/ct.yaml
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # Whole history: a secret removed later is still in old commits.
+          fetch-depth: 0
+
+      - name: Set up gitleaks
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -fsSLO "$url/$file"
+          curl -fsSL "$url/gitleaks_${GITLEAKS_VERSION}_checksums.txt" | grep " $file\$" | sha256sum -c -
+          tar -xzf "$file" gitleaks && rm "$file"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Scan git history for secrets (gitleaks)
+        run: gitleaks git --redact --verbose .
+
   release:
-    needs: lint-test
+    needs: [ lint, test, integration, secrets ]
     if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
-      id-token: write
+      id-token: write          # cosign keyless
     steps:
-      - uses: actions/checkout@v4
-        with: {fetch-depth: 0}
-      - uses: azure/setup-helm@v4
-        with: {version: v3.16.3}
-      - name: Package
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Package chart
         id: pkg
         run: |
-          set -euo pipefail
-          helm package ${CHART_DIR} --destination dist
+          helm package "${CHART_DIR}" --destination dist
           echo "file=$(ls dist/*.tgz)" >> "$GITHUB_OUTPUT"
-          echo "version=$(helm show chart ${CHART_DIR} | awk '/^version:/{print $2}')" >> "$GITHUB_OUTPUT"
-      - name: Push to GHCR (OCI)
+          echo "version=$(helm show chart "${CHART_DIR}" | awk '/^version:/{print $2}')" >> "$GITHUB_OUTPUT"
+
+      # A published version is never overwritten; a push without a version bump stops here.
+      - name: Check whether this version is already published
+        id: published
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ env.GHCR_REPOSITORY }} --password-stdin
-          helm push "${{ steps.pkg.outputs.file }}" "oci://ghcr.io/${{ env.GHCR_REPOSITORY }}/charts"
-      - uses: sigstore/cosign-installer@v3
-      - name: Sign chart (keyless)
-        run: |
-          DIGEST=$(crane digest ghcr.io/${{ env.GHCR_REPOSITORY }}/charts/cups-server:${{ steps.pkg.outputs.version }} 2>/dev/null || true)
-          if [ -n "$DIGEST" ]; then
-            cosign sign --yes "ghcr.io/${{ env.GHCR_REPOSITORY }}/charts/cups-server@${DIGEST}"
+          if helm show chart "oci://ghcr.io/${GHCR_REPOSITORY}/charts/cups-server" --version "$VERSION" > /dev/null 2>&1; then
+            echo "cups-server $VERSION is already in GHCR; leaving it as published."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-        continue-on-error: true
+
+      - name: Push to GHCR (OCI)
+        id: push
+        if: steps.published.outputs.exists == 'false'
+        env:
+          FILE: ${{ steps.pkg.outputs.file }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${GHCR_REPOSITORY}" --password-stdin
+          helm push "$FILE" "oci://ghcr.io/${GHCR_REPOSITORY}/charts" 2>&1 | tee push.log
+          digest=$(grep -oE 'sha256:[0-9a-f]{64}' push.log | head -n1)
+          [ -n "$digest" ] || { echo "::error::no digest in the helm push output"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # cosign reads Docker's credentials, not helm's registry login.
+      - name: Log in to GHCR for cosign
+        if: steps.published.outputs.exists == 'false'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up cosign
+        if: steps.published.outputs.exists == 'false'
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Sign chart (keyless)
+        if: steps.published.outputs.exists == 'false'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/${GHCR_REPOSITORY}/charts/cups-server@${DIGEST}"
+
       # GitHub Releases + a classic index.yaml repo on gh-pages, for consumers
       # that cannot use OCI registries.
       - name: chart-releaser
