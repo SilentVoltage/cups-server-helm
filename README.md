@@ -10,7 +10,6 @@ plugins can be layered in at build time (in the image) or at pod start.
 Published to:
 
 - **OCI:** `oci://ghcr.io/silentvoltage/charts/cups-server`
-- **Classic repo (gh-pages):** `https://silentvoltage.github.io/cups-server-helm`
 
 The container image lives in the companion repo
 [silentvoltage/cups-server-docker][image].
@@ -20,13 +19,6 @@ The container image lives in the companion repo
 ```sh
 helm install printing oci://ghcr.io/silentvoltage/charts/cups-server \
   -n printing --create-namespace
-```
-
-Or add the classic repo:
-
-```sh
-helm repo add cups-server https://silentvoltage.github.io/cups-server-helm
-helm install printing cups-server/cups-server -n printing --create-namespace
 ```
 
 With no Ingress, reach the web UI through a port-forward:
@@ -94,9 +86,9 @@ helm-docs --chart-search-root=charts
 
 CI ([`.github/workflows/chart.yaml`](.github/workflows/chart.yaml)) runs lint,
 unit tests, kubeconform against every `ci/*-values.yaml` profile, a helm-docs
-drift check, and `ct install` on a kind cluster for pull requests. Tags matching
-`cups-server-*` publish the chart to GHCR as a cosign-signed OCI artifact and cut
-a GitHub Release with `chart-releaser` (plus the classic gh-pages index).
+drift check, and `ct install` on a kind cluster for pull requests. Each push to
+`master` with a new chart version publishes it to GHCR as a cosign-signed OCI
+artifact. A version tag (e.g. `0.1.2`) cuts a GitHub Release with the packaged chart.
 
 ## License
 
