@@ -392,7 +392,8 @@ spec:
     {{- if not .Values.persistence.config.existingClaim }}
     - metadata:
         name: config
-        labels: {{- include "cups-server.labels" . | nindent 10 }}
+        # volumeClaimTemplates are immutable: no version labels here.
+        labels: {{- include "cups-server.selectorLabels" . | nindent 10 }}
         {{- with .Values.persistence.config.annotations }}
         annotations: {{- toYaml . | nindent 10 }}
         {{- end }}
@@ -408,7 +409,8 @@ spec:
     {{- if not .Values.persistence.spool.existingClaim }}
     - metadata:
         name: spool
-        labels: {{- include "cups-server.labels" . | nindent 10 }}
+        # volumeClaimTemplates are immutable: no version labels here.
+        labels: {{- include "cups-server.selectorLabels" . | nindent 10 }}
         {{- with .Values.persistence.spool.annotations }}
         annotations: {{- toYaml . | nindent 10 }}
         {{- end }}

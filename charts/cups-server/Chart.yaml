@@ -2,7 +2,7 @@ apiVersion: v2
 name: cups-server
 description: Helm chart for an unprivileged CUPS print server on Kubernetes, with driver plugins, mDNS printer discovery and Prometheus metrics
 type: application
-version: 0.1.1
+version: 0.1.2
 appVersion: "2.4.7"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/silentvoltage/cups-server-helm
